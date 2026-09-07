@@ -38,4 +38,16 @@ terraform {
 # changing region is a one-line edit, not a find-and-replace across files.
 provider "aws" {
   region = var.aws_region
+
+  # default_tags applies these tags to every resource in this configuration
+  # that supports tagging, without adding a `tags` argument to each resource
+  # block individually. IAM role attachments, API Gateway resources/methods/
+  # integrations/deployments, and Lambda permissions have no tags concept in
+  # the AWS API and are unaffected either way.
+  default_tags {
+    tags = {
+      class    = "cs218"
+      exercise = "api-gateway"
+    }
+  }
 }
