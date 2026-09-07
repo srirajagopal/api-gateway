@@ -1,0 +1,6 @@
+# Copy this file to terraform.tfvars and edit the values below.
+# terraform.tfvars is .gitignore'd — it's meant to hold your own
+# account/region choices, not to be committed alongside the .tf files.
+
+aws_region = "us-east-1"
+stage_name = "prod"
