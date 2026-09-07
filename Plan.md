@@ -1,15 +1,12 @@
 # Simple API Gateway → Lambda "Hello" — Terraform + boto3 Plan
 
-**Format:** Terraform for infrastructure, boto3 for build/deploy/test automation, AWS Free Tier–oriented
-
 ---
 
 ## 1. Project Summary
 
-A minimal serverless HTTP endpoint: a REST API exposes `GET /hello`, backed by
-a single Lambda function that returns a static JSON message. No datastore, no
-auth, no event triggers — this is the smallest possible API Gateway + Lambda
-integration.
+A REST API exposes `GET /hello`, backed by a single Lambda function that
+returns a JSON message and echoes back any query string parameters on the
+request.
 
 ```
                            HTTPS
@@ -29,12 +26,16 @@ Postman / Browser ────────────────────�
 
 ```json
 {
-  "message": "Hello"
+  "message": "Hello",
+  "params": {}
 }
 ```
 
-Returned with `Content-Type: application/json` and HTTP 200 for any `GET
-/hello` request. No request body, path params, or query params are read.
+`params` holds whatever query string parameters were on the request (empty
+object if none), e.g. `GET /hello?name=CS218` returns
+`{"message": "Hello", "params": {"name": "CS218"}}`. Returned with
+`Content-Type: application/json` and HTTP 200. Path params and request body
+are not read.
 
 ---
 
@@ -65,24 +66,31 @@ Returned with `Content-Type: application/json` and HTTP 200 for any `GET
 ```
 api-gateway/
 ├── Plan.md                  (this file)
+├── README.md
+├── LICENSE
+├── .gitignore                root-level, Terraform + Python + OS patterns
 ├── infra/
-│   ├── providers.tf         AWS provider + region
-│   ├── lambda.tf            IAM role, Lambda function resource
-│   ├── api.tf               REST API, /hello resource, GET method, integration,
-│   │                        Lambda permission, deployment, stage
-│   ├── outputs.tf           invoke_url output
-│   └── terraform.tfvars.example
+│   ├── providers.tf          AWS provider + region
+│   ├── variables.tf          aws_region, stage_name
+│   ├── lambda.tf             IAM role, Lambda function resource
+│   ├── api.tf                REST API, /hello resource, GET method, integration,
+│   │                         Lambda permission, deployment, stage
+│   ├── outputs.tf            invoke_url, lambda_function_name, rest_api_id
+│   ├── terraform.tfvars.example
+│   └── .terraform.lock.hcl   committed, pins provider versions
 ├── lambda/
 │   └── hello/
-│       └── handler.py       Lambda function source
+│       └── handler.py        Lambda function source
 └── scripts/
-    ├── build_lambda.py      boto3/zipfile: package handler.py into hello.zip
-    └── smoke_test.py        boto3/requests: call the deployed endpoint, assert response
+    ├── requirements.txt
+    ├── build_lambda.py       zip handler.py; optionally push via boto3 update_function_code
+    ├── smoke_test.py         call the deployed endpoint via direct invoke + HTTPS, assert response
+    └── verify_teardown.py    confirm Lambda/API/IAM role are gone after terraform destroy
 ```
 
-Terraform owns all AWS resource state. boto3 is used only for the two things
-Terraform is a poor fit for: zipping Lambda source into a deployment package,
-and exercising the live endpoint end-to-end as a client would.
+Terraform owns all AWS resource state. boto3 covers what Terraform doesn't:
+zipping Lambda source into a deployment package, and calling the live
+endpoint over HTTP the way a client would.
 
 ---
 
@@ -93,16 +101,21 @@ and exercising the live endpoint end-to-end as a client would.
 ```python
 import json
 
+
 def handler(event, context):
+    params = event.get("queryStringParameters") or {}
     return {
         "statusCode": 200,
         "headers": {"Content-Type": "application/json"},
-        "body": json.dumps({"message": "Hello"}),
+        "body": json.dumps({"message": "Hello", "params": params}),
     }
 ```
 
 Runtime: `python3.12`. No third-party dependencies, so the deployment package
 is just the zipped source file — no `pip install -t` vendoring step needed.
+`event["queryStringParameters"]` is populated directly by the API Gateway
+`AWS_PROXY` integration; no Terraform configuration is required to pass query
+parameters through.
 
 ---
 
@@ -119,58 +132,64 @@ is just the zipped source file — no `pip install -t` vendoring step needed.
 | `aws_api_gateway_integration` | `AWS_PROXY` integration from the method to the Lambda function |
 | `aws_lambda_permission` | Grants API Gateway's execution ARN permission to invoke the Lambda |
 | `aws_api_gateway_deployment` | Deploys the API configuration |
-| `aws_api_gateway_stage` | Publishes the deployment under a stage, e.g. `prod` |
+| `aws_api_gateway_stage` | Publishes the deployment under a stage, e.g. `prod` (`var.stage_name`) |
 
-`outputs.tf` exposes `invoke_url` = `https://<api-id>.execute-api.<region>.amazonaws.com/prod/hello`,
+`outputs.tf` exposes `invoke_url` = `https://<api-id>.execute-api.<region>.amazonaws.com/<stage>/hello`,
 so `terraform output invoke_url` feeds directly into `smoke_test.py` and into
 Postman.
 
-Use `data "archive_file"` (or the `build_lambda.py` boto3 script below) to
-produce `hello.zip` from `lambda/hello/handler.py` before `aws_lambda_function`
-references it via `filename` + `source_code_hash`.
+The `archive_file` data source in `lambda.tf` produces `hello.zip` from
+`lambda/hello/handler.py` automatically on `terraform plan`/`apply` —
+`aws_lambda_function` references it via `filename` + `source_code_hash`, so
+editing the handler and re-running `terraform apply` is enough to redeploy.
 
 ---
 
 ## 6. boto3 Scripts
 
 ### `scripts/build_lambda.py`
-Zips `lambda/hello/handler.py` into `infra/hello.zip` using Python's
-`zipfile` module (boto3 isn't strictly required here, but the script lives
-alongside the other automation for a single "run this before `terraform
-apply`" step). Run before every `terraform apply` that changes the handler.
+Zips `lambda/hello/handler.py` into `infra/hello.zip` with Python's `zipfile`
+module. Not required for a normal `terraform apply`, since Terraform packages
+the function itself; useful for inspecting the exact deployment package, or
+for pushing a handler change straight to the live function with `--deploy`
+(boto3 `update_function_code`) without a full `terraform apply`.
 
 ### `scripts/smoke_test.py`
-Uses `boto3` to check the deployed API two ways:
-1. **Direct Lambda invoke** — `boto3.client("lambda").invoke(FunctionName=...,
-   Payload=...)` — confirms the function itself works, independent of API
-   Gateway.
-2. **HTTP call through the deployed stage** — plain `urllib.request` (or
-   `requests` if available) against `terraform output invoke_url`, asserting
-   HTTP 200 and `{"message": "Hello"}` — confirms the full path from the
-   diagram, API Gateway included.
+Checks the deployed API two ways:
+1. **Direct Lambda invoke**, no query params — `boto3.client("lambda").invoke(...)`,
+   asserts `{"message": "Hello", "params": {}}`. Confirms the function itself
+   works, independent of API Gateway.
+2. **HTTP call through the deployed stage**, `?name=CS218` — `urllib.request`
+   against `terraform output invoke_url`, asserts
+   `{"message": "Hello", "params": {"name": "CS218"}}`. Confirms the full
+   path from the diagram, API Gateway included.
 
-Both checks failing narrows the problem to Lambda; only the second failing
-narrows it to the API Gateway integration/permission/deployment.
+If (1) fails, the bug is in the Lambda handler. If (1) passes and (2) fails,
+the bug is in the API Gateway integration/permission/deployment.
+
+### `scripts/verify_teardown.py`
+Read-only check, run after `terraform destroy`: confirms the Lambda function,
+REST API, and IAM role no longer exist via boto3. Does not delete anything.
 
 ---
 
 ## 7. Build & Deploy Steps
 
 ```bash
-cd api-gateway
-python scripts/build_lambda.py          # produces infra/hello.zip
-
-cd infra
+cd api-gateway/infra
 cp terraform.tfvars.example terraform.tfvars   # set aws_region
 terraform init
 terraform apply
 
 terraform output invoke_url
-python ../scripts/smoke_test.py          # exercises Lambda directly and via HTTPS
+curl "$(terraform output -raw invoke_url)?name=CS218"
+# {"message": "Hello", "params": {"name": "CS218"}}
+
+python ../scripts/smoke_test.py --invoke-url "$(terraform output -raw invoke_url)"
 ```
 
-Manual verification alternatives: `curl <invoke_url>` or a Postman `GET`
-request to the same URL — both should return `{"message":"Hello"}`.
+Manual verification alternative: a Postman `GET` request to the same URL,
+with `name=CS218` under the Params tab.
 
 ---
 
@@ -179,6 +198,7 @@ request to the same URL — both should return `{"message":"Hello"}`.
 ```bash
 cd infra
 terraform destroy
+python ../scripts/verify_teardown.py --region us-east-1
 ```
 
 No persistent state (no S3 bucket, no DynamoDB table) exists outside
@@ -193,4 +213,4 @@ Terraform state, so `terraform destroy` fully removes all billable resources.
 | `403 Forbidden` calling the invoke URL | Missing/incorrect `aws_lambda_permission` source ARN, or stage not deployed after a resource change |
 | `502 Bad Gateway` | Lambda handler path wrong (`handler.handler` mismatch) or handler throws before returning a valid `statusCode`/`body` shape |
 | Direct Lambda invoke works, HTTP call fails | Problem is in API Gateway config (integration type, method, deployment/stage), not the function |
-| `terraform apply` doesn't pick up handler code changes | `source_code_hash` not wired to the zip's hash, or `build_lambda.py` wasn't re-run before `apply` |
+| `terraform apply` doesn't pick up handler code changes | `source_code_hash` not wired to the zip's hash |

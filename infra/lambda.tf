@@ -71,9 +71,8 @@ resource "aws_lambda_function" "hello" {
   # `filename` value and assume nothing changed.
   source_code_hash = data.archive_file.hello_lambda.output_base64sha256
 
-  # Max execution time before AWS kills the invocation. 5 seconds is
-  # generous for a function that does no I/O; the default (3s) would also
-  # work, but an explicit value documents the intent instead of relying on
-  # an implicit provider default.
+  # Max execution time before AWS kills the invocation. The function does
+  # no I/O, so the default (3s) would work too; set explicitly instead of
+  # relying on the provider default.
   timeout = 5
 }

@@ -1,11 +1,10 @@
 # ─────────────────────────────────────────────────────────────────────────
 # API Gateway REST API: /hello resource, GET method, Lambda integration
 # ─────────────────────────────────────────────────────────────────────────
-# API Gateway's REST API model is deliberately granular — a URL path is
-# built up resource-by-resource, and each HTTP verb on a resource is its own
-# "method" with its own "integration" describing what happens when it's
-# called. This file walks through that chain from the top (the API
-# container) down to the deployed, callable endpoint.
+# A URL path is built up resource-by-resource, and each HTTP verb on a
+# resource is its own "method" with its own "integration" describing what
+# happens when it's called. This file goes from the API container down to
+# the deployed, callable endpoint.
 
 # The API "container" — doesn't define any paths or behavior on its own.
 resource "aws_api_gateway_rest_api" "hello_api" {
@@ -51,21 +50,19 @@ resource "aws_api_gateway_integration" "lambda_integration" {
   rest_api_id = aws_api_gateway_rest_api.hello_api.id
   resource_id = aws_api_gateway_resource.hello.id
   http_method = aws_api_gateway_method.get_hello.http_method
-  # Lambda's own invocation API is always invoked via POST internally,
-  # regardless of what HTTP verb the *client* used (GET, in our case). This
-  # is an API Gateway/Lambda-proxy quirk, not a mistake — AWS_PROXY
-  # integrations always set this to "POST".
+  # Lambda's invocation API is always called via POST internally, regardless
+  # of the HTTP verb the client used (GET, here). AWS_PROXY integrations
+  # always set this to "POST".
   integration_http_method = "POST"
   type                    = "AWS_PROXY"
   uri                     = aws_lambda_function.hello.invoke_arn
 }
 
 # By default, nothing is allowed to invoke a Lambda function — not even API
-# Gateway, despite the integration above pointing at it. This resource is a
-# *resource-based* policy on the Lambda function itself, separate from the
-# integration, that explicitly grants the API Gateway service permission to
-# call it. Forgetting this is the single most common cause of a
-# "403 Forbidden" response with an otherwise-correct integration.
+# Gateway, despite the integration above pointing at it. This is a
+# resource-based policy on the Lambda function itself, separate from the
+# integration, granting the API Gateway service permission to call it.
+# Omitting it produces a 403 on an otherwise-correct integration.
 resource "aws_lambda_permission" "apigw_invoke" {
   statement_id  = "AllowAPIGatewayInvoke"
   action        = "lambda:InvokeFunction"
